@@ -2,9 +2,13 @@
 
 Инструмент для переноса стека **Bedolaga Bot + Cabinet + remnawave-admin** на новый VPS.
 
+## Быстрый запуск
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Origamidnd/bedolaga-mover/main/bedolaga-mover.sh)
 ```
-bash bedolaga-mover.sh
-```
+
+Запускай на любом сервере — скрипт скачается и сразу откроет меню.
 
 ```
   ██████╗ ███████╗██████╗  ██████╗ ██╗      █████╗  ██████╗  █████╗
