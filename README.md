@@ -11,18 +11,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Origamidnd/bedolaga-mover/ma
 Запускай на любом сервере — скрипт скачается и сразу откроет меню.
 
 ```
-  ██████╗ ███████╗██████╗  ██████╗ ██╗      █████╗  ██████╗  █████╗
-  ██╔══██╗██╔════╝██╔══██╗██╔═══██╗██║     ██╔══██╗██╔════╝ ██╔══██╗
-  ██████╔╝█████╗  ██║  ██║██║   ██║██║     ███████║██║  ███╗███████║
-  ██╔══██╗██╔══╝  ██║  ██║██║   ██║██║     ██╔══██║██║   ██║██╔══██║
-  ██████╔╝███████╗██████╔╝╚██████╔╝███████╗██║  ██║╚██████╔╝██║  ██║
-  ╚═════╝ ╚══════╝╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝
-
-                 M O V E R  —  инструмент переноса
-
   Что делаем?
 
-  1) 📦 Упаковать      — я на СТАРОМ сервере, хочу собрать архив
+  1) 📦 Упаковать      — я на СТАРОМ сервере, хочу перенести на новый
   2) 🚀 Распаковать    — я на НОВОМ сервере, архив уже загружен
   0) Выход
 ```
@@ -35,6 +26,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Origamidnd/bedolaga-mover/ma
 | Cabinet | `.env` |
 | remnawave-admin | PostgreSQL БД, `.env`, `frontend-static/` |
 | Caddy | `Caddyfile` |
+
+Если Cabinet или remnawave-admin нет — скрипт их пропустит, перенесёт только то что найдёт.
 
 ## Требования к новому серверу
 
@@ -54,15 +47,15 @@ apt update && apt install caddy -y
 ### Шаг 1 — На старом сервере
 
 ```bash
-bash bedolaga-mover.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/Origamidnd/bedolaga-mover/main/bedolaga-mover.sh)
 # → выбрать «1) Упаковать»
 ```
 
-Скрипт создаёт `/root/bedolaga_migration.tar.gz`. Бот при этом не останавливается.
+Скрипт остановит ботов, снимет дампы БД, соберёт архив `/root/bedolaga_migration.tar.gz`. PostgreSQL и Redis продолжат работать — данные в сохранности.
 
 Если папки не стандартные:
 ```bash
-BOT_DIR=/opt/mybot CABINET_DIR=/opt/cabinet bash bedolaga-mover.sh
+BOT_DIR=/opt/mybot CABINET_DIR=/opt/cabinet bash <(curl -fsSL ...)
 ```
 
 ### Шаг 2 — Передать архив
@@ -74,11 +67,11 @@ scp /root/bedolaga_migration.tar.gz root@NEW_IP:/root/
 ### Шаг 3 — На новом сервере
 
 ```bash
-bash bedolaga-mover.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/Origamidnd/bedolaga-mover/main/bedolaga-mover.sh)
 # → выбрать «2) Распаковать»
 ```
 
-Скрипт сам клонирует репозитории, восстановит БД, поднимет контейнеры и перезапустит Caddy.
+Скрипт клонирует репозитории, восстановит БД, поднимет все контейнеры и перезапустит Caddy.
 
 ### Шаг 4 — Переключить DNS
 
@@ -89,14 +82,7 @@ bash bedolaga-mover.sh
 journalctl -u caddy -n 30 | grep "obtained"
 ```
 
-### Шаг 5 — Остановить бота на старом сервере
-
-```bash
-cd /root/remnawave-bedolaga-telegram-bot
-docker compose stop bot
-```
-
-> Старый сервер остаётся включённым как резерв. Если что-то пойдёт не так — `docker compose up -d` и DNS обратно.
+> Старый сервер остаётся включённым как резерв. Если что-то пойдёт не так — поднимаешь ботов там и меняешь DNS обратно.
 
 ## Откат
 
@@ -109,20 +95,15 @@ docker compose up -d
 
 ## Известные нюансы
 
-**remnawave-admin конфликт:** Если бот запущен одновременно на старом и новом серверах — Telegram выдаст `TelegramConflictError`. Остановить на старом:
+**DNS TTL:** Проверить что изменение применилось можно напрямую через NS:
 ```bash
-cd ~/remnawave-admin && docker compose stop bot
+dig +short yourdomain.com @ns1.reg.ru
 ```
 
 **Права на папки бота:** Если бот не стартует с `PermissionError`:
 ```bash
 chmod -R 777 /root/remnawave-bedolaga-telegram-bot/logs
 chmod -R 777 /root/remnawave-bedolaga-telegram-bot/data
-```
-
-**DNS TTL:** Проверить что изменение применилось можно напрямую через NS:
-```bash
-dig +short yourdomain.com @ns1.reg.ru
 ```
 
 ## Совместимость
