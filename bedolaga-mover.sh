@@ -42,11 +42,17 @@ header() {
 
 # =============================================================
 # PACK — упаковка на старом сервере
+# Останавливает ботов, снимает дамп, оставляет только БД
 # =============================================================
 cmd_pack() {
   header
-  echo -e "  ${BOLD}📦 PACK — упаковка данных для переноса${NC}"
-  echo -e "  ${CYAN}────────────────────────────────────────${NC}"
+  echo -e "  ${BOLD}📦 Упаковка — подготовка к переносу${NC}"
+  echo -e "  ${CYAN}─────────────────────────────────────${NC}"
+  echo -e "  ${YELLOW}Боты будут остановлены. БД (postgres/redis) останутся работать.${NC}"
+  echo -e "  ${YELLOW}На новом сервере конфликтов не будет.${NC}"
+  echo ""
+  read -rp "  Продолжить? [y/N]: " confirm
+  [[ "$confirm" =~ ^[Yy]$ ]] || { warn "Отменено"; return; }
   echo ""
 
   [ ! -d "$BOT_DIR" ]      && fail "Папка бота не найдена: $BOT_DIR"
@@ -54,10 +60,23 @@ cmd_pack() {
   command -v docker &>/dev/null || fail "Docker не установлен"
 
   WORK_DIR=$(mktemp -d)
-  trap "rm -rf $WORK_DIR" EXIT
+  trap "rm -rf '$WORK_DIR'" EXIT
 
-  # БД Bedolaga бота
-  log "Снимаем дамп БД бота (бот продолжает работать)..."
+  # ── Останавливаем ботов ───────────────────────────────────
+  log "Останавливаем Bedolaga бота..."
+  cd "$BOT_DIR"
+  docker compose stop bot
+  ok "Bedolaga бот остановлен"
+
+  if [ -d "$RMADMIN_DIR" ] && [ -f "$RMADMIN_DIR/docker-compose.yml" ]; then
+    log "Останавливаем remnawave-admin бота..."
+    cd "$RMADMIN_DIR"
+    docker compose stop bot 2>/dev/null && ok "remnawave-admin бот остановлен" \
+      || warn "remnawave-admin бот не найден или уже остановлен"
+  fi
+
+  # ── БД Bedolaga бота ─────────────────────────────────────
+  log "Снимаем дамп БД бота..."
   source <(grep -E "^POSTGRES_(USER|DB)" "$BOT_DIR/.env" 2>/dev/null || true)
   POSTGRES_USER="${POSTGRES_USER:-remnawave_user}"
   POSTGRES_DB="${POSTGRES_DB:-remnawave_bot}"
@@ -69,21 +88,21 @@ cmd_pack() {
   [ -s "$WORK_DIR/bot_db.dump" ] || fail "Дамп БД пустой"
   ok "Дамп БД бота: $(du -sh "$WORK_DIR/bot_db.dump" | cut -f1)"
 
-  # Файлы бота
+  # ── Файлы бота ────────────────────────────────────────────
   cp "$BOT_DIR/.env" "$WORK_DIR/bot.env"
   for d in uploads locales; do
     [ -d "$BOT_DIR/$d" ] && cp -r "$BOT_DIR/$d" "$WORK_DIR/bot_$d" && ok "Скопировано: $d"
   done
   [ -f "$BOT_DIR/vpn_logo.png" ] && cp "$BOT_DIR/vpn_logo.png" "$WORK_DIR/" && ok "Скопировано: vpn_logo.png"
 
-  # Cabinet
+  # ── Cabinet ───────────────────────────────────────────────
   if [ -f "$CABINET_DIR/.env" ]; then
     cp "$CABINET_DIR/.env" "$WORK_DIR/cabinet.env" && ok "Скопировано: cabinet .env"
   else
     warn "Cabinet .env не найден — пропускаем"
   fi
 
-  # remnawave-admin
+  # ── remnawave-admin ───────────────────────────────────────
   if [ -d "$RMADMIN_DIR" ] && [ -f "$RMADMIN_DIR/docker-compose.yml" ]; then
     log "Снимаем дамп БД remnawave-admin..."
     source <(grep -E "^POSTGRES_(USER|DB)" "$RMADMIN_DIR/.env" 2>/dev/null || true)
@@ -96,7 +115,7 @@ cmd_pack() {
       > "$WORK_DIR/rmadmin_db.dump" 2>/dev/null || warn "Не удалось снять дамп rmadmin БД"
     [ -s "$WORK_DIR/rmadmin_db.dump" ] && ok "Дамп rmadmin БД: $(du -sh "$WORK_DIR/rmadmin_db.dump" | cut -f1)"
 
-    cp "$RMADMIN_DIR/.env" "$WORK_DIR/rmadmin.env" 2>/dev/null        && ok "Скопировано: rmadmin .env"
+    cp "$RMADMIN_DIR/.env" "$WORK_DIR/rmadmin.env" 2>/dev/null && ok "Скопировано: rmadmin .env"
     [ -d "$RMADMIN_DIR/frontend-static" ] && \
       cp -r "$RMADMIN_DIR/frontend-static" "$WORK_DIR/rmadmin_frontend_static" && \
       ok "Скопировано: rmadmin frontend-static"
@@ -104,28 +123,30 @@ cmd_pack() {
     warn "remnawave-admin не найден — пропускаем"
   fi
 
-  # Caddy
+  # ── Caddy ─────────────────────────────────────────────────
   if [ -f "/etc/caddy/Caddyfile" ]; then
     cp "/etc/caddy/Caddyfile" "$WORK_DIR/Caddyfile" && ok "Скопировано: Caddyfile"
   else
     warn "Caddyfile не найден — пропускаем"
   fi
 
-  # Архив
+  # ── Архив ─────────────────────────────────────────────────
   log "Создаём архив..."
   tar -czf "$ARCHIVE" -C "$WORK_DIR" .
   ok "Архив готов: $ARCHIVE ($(du -sh "$ARCHIVE" | cut -f1))"
 
   echo ""
-  echo -e "  ${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
-  echo -e "  ${GREEN}║  Упаковка завершена!                                 ║${NC}"
-  echo -e "  ${GREEN}║                                                      ║${NC}"
-  echo -e "  ${GREEN}║  Передай архив на новый сервер:                      ║${NC}"
-  echo -e "  ${GREEN}║  ${CYAN}scp $ARCHIVE root@NEW_IP:/root/${GREEN}  ║${NC}"
-  echo -e "  ${GREEN}║                                                      ║${NC}"
-  echo -e "  ${GREEN}║  Затем на новом сервере запусти:                     ║${NC}"
-  echo -e "  ${GREEN}║  ${CYAN}bash bedolaga-mover.sh${GREEN}  → выбери «Распаковать»     ║${NC}"
-  echo -e "  ${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
+  echo -e "  ${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
+  echo -e "  ${GREEN}║  Упаковка завершена!                                     ║${NC}"
+  echo -e "  ${GREEN}║                                                          ║${NC}"
+  echo -e "  ${GREEN}║  Боты остановлены. БД работает.                         ║${NC}"
+  echo -e "  ${GREEN}║                                                          ║${NC}"
+  echo -e "  ${GREEN}║  Передай архив на новый сервер:                          ║${NC}"
+  echo -e "  ${GREEN}║  ${CYAN}scp $ARCHIVE root@NEW_IP:/root/${GREEN}    ║${NC}"
+  echo -e "  ${GREEN}║                                                          ║${NC}"
+  echo -e "  ${GREEN}║  Затем на новом сервере запусти скрипт и                 ║${NC}"
+  echo -e "  ${GREEN}║  выбери «Распаковать на новом сервере»                   ║${NC}"
+  echo -e "  ${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
   echo ""
 }
 
@@ -134,8 +155,8 @@ cmd_pack() {
 # =============================================================
 cmd_unpack() {
   header
-  echo -e "  ${BOLD}🚀 UNPACK — разворачивание на новом сервере${NC}"
-  echo -e "  ${CYAN}────────────────────────────────────────────${NC}"
+  echo -e "  ${BOLD}🚀 Распаковать на новом сервере${NC}"
+  echo -e "  ${CYAN}────────────────────────────────${NC}"
   echo ""
 
   command -v docker &>/dev/null || fail "Docker не установлен. Запусти: curl -fsSL https://get.docker.com | sh"
@@ -143,12 +164,12 @@ cmd_unpack() {
   [ -f "$ARCHIVE" ]             || fail "Архив не найден: $ARCHIVE"
 
   WORK_DIR=$(mktemp -d)
-  trap "rm -rf $WORK_DIR" EXIT
+  trap "rm -rf '$WORK_DIR'" EXIT
   tar -xzf "$ARCHIVE" -C "$WORK_DIR"
   SRC="$WORK_DIR"
   ok "Архив распакован"
 
-  # Bedolaga бот
+  # ── Bedolaga бот ─────────────────────────────────────────
   log "Разворачиваем Bedolaga бота..."
   if [ ! -d "$BOT_DIR/.git" ]; then
     git clone https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot.git "$BOT_DIR"
@@ -184,7 +205,7 @@ cmd_unpack() {
   docker compose build --quiet && docker compose up -d
   ok "Bedolaga бот запущен"
 
-  # Cabinet
+  # ── Cabinet ───────────────────────────────────────────────
   if [ -f "$SRC/cabinet.env" ]; then
     log "Разворачиваем Cabinet..."
     mkdir -p "$CABINET_DIR"
@@ -212,7 +233,7 @@ EOF
     warn "cabinet.env не найден — Cabinet пропущен"
   fi
 
-  # remnawave-admin
+  # ── remnawave-admin ───────────────────────────────────────
   if [ -f "$SRC/rmadmin.env" ]; then
     log "Разворачиваем remnawave-admin..."
     if [ ! -d "$RMADMIN_DIR/.git" ]; then
@@ -247,7 +268,7 @@ EOF
     warn "rmadmin.env не найден — remnawave-admin пропущен"
   fi
 
-  # Caddy
+  # ── Caddy ─────────────────────────────────────────────────
   if [ -f "$SRC/Caddyfile" ]; then
     cp "$SRC/Caddyfile" /etc/caddy/Caddyfile
     caddy validate --config /etc/caddy/Caddyfile &>/dev/null && \
@@ -261,10 +282,9 @@ EOF
   echo -e "  ${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
   echo -e "  ${GREEN}║  Готово! Что делать дальше:                          ║${NC}"
   echo -e "  ${GREEN}║  1. Смени DNS A-записи на IP этого сервера           ║${NC}"
-  echo -e "  ${GREEN}║  2. Останови бота на СТАРОМ сервере:                 ║${NC}"
-  echo -e "  ${GREEN}║     ${CYAN}docker compose stop bot${GREEN}                        ║${NC}"
-  echo -e "  ${GREEN}║  3. Проверь TLS сертификаты:                         ║${NC}"
+  echo -e "  ${GREEN}║  2. Проверь TLS сертификаты:                         ║${NC}"
   echo -e "  ${GREEN}║     ${CYAN}journalctl -u caddy -n 20 | grep obtained${GREEN}     ║${NC}"
+  echo -e "  ${GREEN}║  3. Старый сервер оставь включённым как резерв       ║${NC}"
   echo -e "  ${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
   echo ""
   echo -e "  ${BOLD}Статус контейнеров:${NC}"
@@ -279,12 +299,11 @@ main_menu() {
   while true; do
     header
     echo -e "  Что делаем?\n"
-    echo -e "  ${GREEN}1)${NC} ${BOLD}📦 Упаковать${NC}      — я на СТАРОМ сервере, хочу собрать архив"
-    echo -e "  ${CYAN}2)${NC} ${BOLD}🚀 Распаковать${NC}    — я на НОВОМ сервере, архив уже загружен"
+    echo -e "  ${GREEN}1)${NC} ${BOLD}📦 Упаковать${NC}      — я на СТАРОМ сервере, хочу перенести на новый"
+    echo -e "  ${YELLOW}2)${NC} ${BOLD}🚀 Распаковать${NC}    — я на НОВОМ сервере, архив уже загружен"
     echo -e "  ${RED}0)${NC} ${BOLD}Выход${NC}"
     echo ""
 
-    # Подсказка по наличию архива
     if [ -f "$ARCHIVE" ]; then
       echo -e "  ${YELLOW}ℹ  Найден архив: $ARCHIVE ($(du -sh "$ARCHIVE" | cut -f1))${NC}"
     fi
@@ -292,8 +311,8 @@ main_menu() {
 
     read -rp "  Выбор [0-2]: " choice
     case "$choice" in
-      1) cmd_pack   ; read -rp "  Нажми Enter для возврата в меню..." ; ;;
-      2) cmd_unpack ; read -rp "  Нажми Enter для возврата в меню..." ; ;;
+      1) cmd_pack   ; read -rp "  Нажми Enter для возврата в меню..." ;;
+      2) cmd_unpack ; read -rp "  Нажми Enter для возврата в меню..." ;;
       0) echo "" ; exit 0 ;;
       *) warn "Неверный выбор" ; sleep 1 ;;
     esac
