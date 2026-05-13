@@ -13,12 +13,7 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# ── Конфигурация ──────────────────────────────────────────────
-BOT_DIR="${BOT_DIR:-/root/remnawave-bedolaga-telegram-bot}"
-CABINET_DIR="${CABINET_DIR:-/opt/bedolaga-cabinet}"
-RMADMIN_DIR="${RMADMIN_DIR:-/root/remnawave-admin}"
 ARCHIVE="/root/bedolaga_migration.tar.gz"
-# ─────────────────────────────────────────────────────────────
 
 log()  { echo -e "${CYAN}[*]${NC} $1"; }
 ok()   { echo -e "${GREEN}[✓]${NC} $1"; }
@@ -41,41 +36,157 @@ header() {
 }
 
 # =============================================================
+# АВТОПОИСК ПУТЕЙ
+# Порядок: docker inspect → стандартные пути → спросить вручную
+# =============================================================
+
+# Находит рабочую папку компонента по имени контейнера
+_find_by_container() {
+  local container="$1"
+  command -v docker &>/dev/null || return 1
+  docker inspect "$container" 2>/dev/null \
+    | grep '"Source"' \
+    | awk -F'"' '{print $4}' \
+    | grep -v '/var/lib/docker' \
+    | head -1 \
+    | xargs -I{} dirname {} 2>/dev/null || return 1
+}
+
+# Ищет папку по стандартным путям (glob-безопасно)
+_find_by_paths() {
+  local -a candidates=("$@")
+  for p in "${candidates[@]}"; do
+    # glob для /home/*/...
+    for expanded in $p; do
+      [ -f "$expanded/docker-compose.yml" ] && echo "$expanded" && return 0
+      [ -f "$expanded/.env" ]               && echo "$expanded" && return 0
+    done
+  done
+  return 1
+}
+
+find_bot_dir() {
+  # Если задан явно — доверяем
+  [ -n "$BOT_DIR" ] && { echo "$BOT_DIR"; return; }
+
+  local found
+
+  # 1. Через docker inspect
+  for cname in remnawave_bot remnawave-bot bedolaga_bot; do
+    found=$(_find_by_container "$cname" 2>/dev/null) && [ -n "$found" ] && { echo "$found"; return; }
+  done
+
+  # 2. Стандартные пути
+  found=$(_find_by_paths \
+    /root/remnawave-bedolaga-telegram-bot \
+    /opt/remnawave-bedolaga-telegram-bot \
+    "/home/*/remnawave-bedolaga-telegram-bot" \
+    /root/bedolaga-telegram-bot \
+    /opt/bedolaga-telegram-bot \
+  2>/dev/null) && [ -n "$found" ] && { echo "$found"; return; }
+
+  # 3. Спросить вручную
+  echo ""
+  warn "Папка Bedolaga бота не найдена автоматически"
+  read -rp "  Укажи путь вручную (или Enter чтобы пропустить): " manual
+  [ -n "$manual" ] && echo "$manual" || echo ""
+}
+
+find_cabinet_dir() {
+  [ -n "$CABINET_DIR" ] && { echo "$CABINET_DIR"; return; }
+
+  local found
+
+  for cname in cabinet_frontend bedolaga_cabinet remnawave_cabinet; do
+    found=$(_find_by_container "$cname" 2>/dev/null) && [ -n "$found" ] && { echo "$found"; return; }
+  done
+
+  found=$(_find_by_paths \
+    /opt/bedolaga-cabinet \
+    /root/bedolaga-cabinet \
+    "/home/*/bedolaga-cabinet" \
+    /opt/cabinet \
+    /root/cabinet \
+  2>/dev/null) && [ -n "$found" ] && { echo "$found"; return; }
+
+  echo ""
+  warn "Папка Cabinet не найдена — пропускаем"
+  echo ""
+}
+
+find_rmadmin_dir() {
+  [ -n "$RMADMIN_DIR" ] && { echo "$RMADMIN_DIR"; return; }
+
+  local found
+
+  for cname in remnawave-admin-bot-1 remnawave_admin remnawave-admin; do
+    found=$(_find_by_container "$cname" 2>/dev/null) && [ -n "$found" ] && { echo "$found"; return; }
+  done
+
+  found=$(_find_by_paths \
+    /root/remnawave-admin \
+    /opt/remnawave-admin \
+    "/home/*/remnawave-admin" \
+  2>/dev/null) && [ -n "$found" ] && { echo "$found"; return; }
+
+  echo ""
+  warn "Папка remnawave-admin не найдена — пропускаем"
+  echo ""
+}
+
+# =============================================================
 # PACK — упаковка на старом сервере
-# Останавливает ботов, снимает дамп, оставляет только БД
 # =============================================================
 cmd_pack() {
   header
   echo -e "  ${BOLD}📦 Упаковка — подготовка к переносу${NC}"
   echo -e "  ${CYAN}─────────────────────────────────────${NC}"
-  echo -e "  ${YELLOW}Боты будут остановлены. БД (postgres/redis) останутся работать.${NC}"
-  echo -e "  ${YELLOW}На новом сервере конфликтов не будет.${NC}"
+  echo ""
+
+  command -v docker &>/dev/null || fail "Docker не установлен"
+
+  # Ищем компоненты
+  log "Ищем компоненты на этом сервере..."
+  BOT_DIR=$(find_bot_dir)
+  CABINET_DIR=$(find_cabinet_dir)
+  RMADMIN_DIR=$(find_rmadmin_dir)
+
+  echo ""
+  echo -e "  ${BOLD}Найдено:${NC}"
+  [ -n "$BOT_DIR" ]     && echo -e "  ${GREEN}✓${NC} Бот:            $BOT_DIR" \
+                        || echo -e "  ${RED}✗${NC} Бот:            не найден"
+  [ -n "$CABINET_DIR" ] && echo -e "  ${GREEN}✓${NC} Cabinet:        $CABINET_DIR" \
+                        || echo -e "  ${YELLOW}–${NC} Cabinet:        не найден, пропустим"
+  [ -n "$RMADMIN_DIR" ] && echo -e "  ${GREEN}✓${NC} remnawave-admin: $RMADMIN_DIR" \
+                        || echo -e "  ${YELLOW}–${NC} remnawave-admin: не найден, пропустим"
+  echo ""
+
+  [ -z "$BOT_DIR" ] && fail "Бот не найден — перенос невозможен"
+  [ ! -f "$BOT_DIR/.env" ] && fail ".env бота не найден в $BOT_DIR"
+
+  echo -e "  ${YELLOW}Боты будут остановлены. БД (postgres/redis) продолжат работать.${NC}"
   echo ""
   read -rp "  Продолжить? [y/N]: " confirm
   [[ "$confirm" =~ ^[Yy]$ ]] || { warn "Отменено"; return; }
   echo ""
 
-  [ ! -d "$BOT_DIR" ]      && fail "Папка бота не найдена: $BOT_DIR"
-  [ ! -f "$BOT_DIR/.env" ] && fail ".env бота не найден"
-  command -v docker &>/dev/null || fail "Docker не установлен"
-
   WORK_DIR=$(mktemp -d)
   trap "rm -rf '$WORK_DIR'" EXIT
 
-  # ── Останавливаем ботов ───────────────────────────────────
+  # Останавливаем ботов
   log "Останавливаем Bedolaga бота..."
   cd "$BOT_DIR"
   docker compose stop bot
   ok "Bedolaga бот остановлен"
 
-  if [ -d "$RMADMIN_DIR" ] && [ -f "$RMADMIN_DIR/docker-compose.yml" ]; then
+  if [ -n "$RMADMIN_DIR" ] && [ -f "$RMADMIN_DIR/docker-compose.yml" ]; then
     log "Останавливаем remnawave-admin бота..."
     cd "$RMADMIN_DIR"
     docker compose stop bot 2>/dev/null && ok "remnawave-admin бот остановлен" \
       || warn "remnawave-admin бот не найден или уже остановлен"
   fi
 
-  # ── БД Bedolaga бота ─────────────────────────────────────
+  # БД Bedolaga бота
   log "Снимаем дамп БД бота..."
   source <(grep -E "^POSTGRES_(USER|DB)" "$BOT_DIR/.env" 2>/dev/null || true)
   POSTGRES_USER="${POSTGRES_USER:-remnawave_user}"
@@ -88,22 +199,20 @@ cmd_pack() {
   [ -s "$WORK_DIR/bot_db.dump" ] || fail "Дамп БД пустой"
   ok "Дамп БД бота: $(du -sh "$WORK_DIR/bot_db.dump" | cut -f1)"
 
-  # ── Файлы бота ────────────────────────────────────────────
+  # Файлы бота
   cp "$BOT_DIR/.env" "$WORK_DIR/bot.env"
   for d in uploads locales; do
     [ -d "$BOT_DIR/$d" ] && cp -r "$BOT_DIR/$d" "$WORK_DIR/bot_$d" && ok "Скопировано: $d"
   done
   [ -f "$BOT_DIR/vpn_logo.png" ] && cp "$BOT_DIR/vpn_logo.png" "$WORK_DIR/" && ok "Скопировано: vpn_logo.png"
 
-  # ── Cabinet ───────────────────────────────────────────────
-  if [ -f "$CABINET_DIR/.env" ]; then
+  # Cabinet
+  if [ -n "$CABINET_DIR" ] && [ -f "$CABINET_DIR/.env" ]; then
     cp "$CABINET_DIR/.env" "$WORK_DIR/cabinet.env" && ok "Скопировано: cabinet .env"
-  else
-    warn "Cabinet .env не найден — пропускаем"
   fi
 
-  # ── remnawave-admin ───────────────────────────────────────
-  if [ -d "$RMADMIN_DIR" ] && [ -f "$RMADMIN_DIR/docker-compose.yml" ]; then
+  # remnawave-admin
+  if [ -n "$RMADMIN_DIR" ] && [ -f "$RMADMIN_DIR/docker-compose.yml" ]; then
     log "Снимаем дамп БД remnawave-admin..."
     source <(grep -E "^POSTGRES_(USER|DB)" "$RMADMIN_DIR/.env" 2>/dev/null || true)
     RA_USER="${POSTGRES_USER:-postgres}"
@@ -119,27 +228,23 @@ cmd_pack() {
     [ -d "$RMADMIN_DIR/frontend-static" ] && \
       cp -r "$RMADMIN_DIR/frontend-static" "$WORK_DIR/rmadmin_frontend_static" && \
       ok "Скопировано: rmadmin frontend-static"
-  else
-    warn "remnawave-admin не найден — пропускаем"
   fi
 
-  # ── Caddy ─────────────────────────────────────────────────
+  # Caddy
   if [ -f "/etc/caddy/Caddyfile" ]; then
     cp "/etc/caddy/Caddyfile" "$WORK_DIR/Caddyfile" && ok "Скопировано: Caddyfile"
   else
     warn "Caddyfile не найден — пропускаем"
   fi
 
-  # ── Архив ─────────────────────────────────────────────────
+  # Архив
   log "Создаём архив..."
   tar -czf "$ARCHIVE" -C "$WORK_DIR" .
   ok "Архив готов: $ARCHIVE ($(du -sh "$ARCHIVE" | cut -f1))"
 
   echo ""
   echo -e "  ${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
-  echo -e "  ${GREEN}║  Упаковка завершена!                                     ║${NC}"
-  echo -e "  ${GREEN}║                                                          ║${NC}"
-  echo -e "  ${GREEN}║  Боты остановлены. БД работает.                         ║${NC}"
+  echo -e "  ${GREEN}║  Упаковка завершена! Боты остановлены.                   ║${NC}"
   echo -e "  ${GREEN}║                                                          ║${NC}"
   echo -e "  ${GREEN}║  Передай архив на новый сервер:                          ║${NC}"
   echo -e "  ${GREEN}║  ${CYAN}scp $ARCHIVE root@NEW_IP:/root/${GREEN}    ║${NC}"
@@ -163,13 +268,18 @@ cmd_unpack() {
   command -v caddy  &>/dev/null || fail "Caddy не установлен. См. README.md"
   [ -f "$ARCHIVE" ]             || fail "Архив не найден: $ARCHIVE"
 
+  # Пути на новом сервере — стандартные (можно переопределить через env)
+  BOT_DIR="${BOT_DIR:-/root/remnawave-bedolaga-telegram-bot}"
+  CABINET_DIR="${CABINET_DIR:-/opt/bedolaga-cabinet}"
+  RMADMIN_DIR="${RMADMIN_DIR:-/root/remnawave-admin}"
+
   WORK_DIR=$(mktemp -d)
   trap "rm -rf '$WORK_DIR'" EXIT
   tar -xzf "$ARCHIVE" -C "$WORK_DIR"
   SRC="$WORK_DIR"
   ok "Архив распакован"
 
-  # ── Bedolaga бот ─────────────────────────────────────────
+  # Bedolaga бот
   log "Разворачиваем Bedolaga бота..."
   if [ ! -d "$BOT_DIR/.git" ]; then
     git clone https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot.git "$BOT_DIR"
@@ -205,7 +315,7 @@ cmd_unpack() {
   docker compose build --quiet && docker compose up -d
   ok "Bedolaga бот запущен"
 
-  # ── Cabinet ───────────────────────────────────────────────
+  # Cabinet
   if [ -f "$SRC/cabinet.env" ]; then
     log "Разворачиваем Cabinet..."
     mkdir -p "$CABINET_DIR"
@@ -230,10 +340,10 @@ EOF
     docker compose pull --quiet && docker compose up -d
     ok "Cabinet запущен"
   else
-    warn "cabinet.env не найден — Cabinet пропущен"
+    warn "cabinet.env не найден в архиве — Cabinet пропущен"
   fi
 
-  # ── remnawave-admin ───────────────────────────────────────
+  # remnawave-admin
   if [ -f "$SRC/rmadmin.env" ]; then
     log "Разворачиваем remnawave-admin..."
     if [ ! -d "$RMADMIN_DIR/.git" ]; then
@@ -241,8 +351,12 @@ EOF
     fi
 
     cp "$SRC/rmadmin.env" "$RMADMIN_DIR/.env"
-    [ -d "$SRC/rmadmin_frontend_static" ] && \
+    if [ -d "$SRC/rmadmin_frontend_static" ]; then
       cp -r "$SRC/rmadmin_frontend_static" "$RMADMIN_DIR/frontend-static"
+      # Caddy запускается не от root и не может читать /root/ без этого
+      chmod 755 /root
+      ok "Права на /root исправлены для Caddy"
+    fi
 
     docker network create remnawave-network 2>/dev/null || true
 
@@ -265,17 +379,17 @@ EOF
     docker compose up -d
     ok "remnawave-admin запущен"
   else
-    warn "rmadmin.env не найден — remnawave-admin пропущен"
+    warn "rmadmin.env не найден в архиве — remnawave-admin пропущен"
   fi
 
-  # ── Caddy ─────────────────────────────────────────────────
+  # Caddy
   if [ -f "$SRC/Caddyfile" ]; then
     cp "$SRC/Caddyfile" /etc/caddy/Caddyfile
     caddy validate --config /etc/caddy/Caddyfile &>/dev/null && \
       systemctl reload caddy && ok "Caddy перезапущен" || \
       warn "Ошибка в Caddyfile — проверь: caddy validate --config /etc/caddy/Caddyfile"
   else
-    warn "Caddyfile не найден — настрой Caddy вручную"
+    warn "Caddyfile не найден в архиве — настрой Caddy вручную"
   fi
 
   echo ""
